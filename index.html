@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+  <meta name="theme-color" content="#070a0f">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="载体协议">
+  <meta name="format-detection" content="telephone=no">
+  <title>载体协议 VESSEL</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="assets/icons/icon-192.png">
+  <link rel="icon" type="image/png" href="assets/icons/icon-192.png">
+  <link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+  <div id="boot" class="boot">
+    <div class="boot-mark">V</div>
+    <div class="boot-text">载体协议</div>
+    <div class="boot-sub">正在建立连接…</div>
+  </div>
+
+  <div id="app" class="app is-hidden">
+    <header id="topbar" class="topbar"></header>
+    <main id="view" class="view"></main>
+    <nav id="tabbar" class="tabbar"></nav>
+    <button id="fab" class="fab" type="button" aria-label="记录">＋</button>
+  </div>
+
+  <div id="overlay" class="overlay is-hidden" aria-hidden="true"></div>
+  <div id="toast" class="toast is-hidden" role="status"></div>
+  <div id="takeover" class="takeover is-hidden" aria-hidden="true"></div>
+
+  <script src="assets/content-base.js"></script>
+  <script src="assets/content-tasks.js"></script>
+  <script src="assets/content-meta.js"></script>
+  <script src="assets/core.js"></script>
+  <script src="assets/app.js"></script>
+</body>
+</html>

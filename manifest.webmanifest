@@ -1,0 +1,27 @@
+{
+  "name": "载体协议 VESSEL",
+  "short_name": "载体协议",
+  "description": "把肉身当作角色来操作：任务、结算、残渣、属性、战报。纯本地，不联网。",
+  "lang": "zh-CN",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "portrait",
+  "background_color": "#05070b",
+  "theme_color": "#070a0f",
+  "categories": ["productivity", "lifestyle"],
+  "icons": [
+    { "src": "assets/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "assets/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "assets/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    {
+      "name": "现场记录",
+      "short_name": "记录",
+      "url": "./index.html?quick=1",
+      "icons": [{ "src": "assets/icons/icon-192.png", "sizes": "192x192" }]
+    }
+  ]
+}
