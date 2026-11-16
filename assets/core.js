@@ -218,7 +218,10 @@
         credo: [],
         stage: '原始载体'
       },
-      settings: { resetHour: 4, difficulty: 'hardcore', sound: true, haptics: true, motion: true, theme: 'cyan' },
+      settings: {
+        resetHour: 4, difficulty: 'hardcore', sound: true, haptics: true, motion: true, theme: 'cyan',
+        restDays: [0, 6], holidays: [], workdays: []
+      },
       calibration: cal,
       day: null,
       streak: { current: 0, best: 0, lastSettled: '', shields: 1, shieldMonth: '' },
@@ -241,7 +244,11 @@
         recentFamilies: [],
         recentMicro: [],
         counters: { residues: 0, converted: 0, settledDays: 0, allClearDays: 0, tasks: 0, rejected: 0, approved: 0 },
-        migrations: []
+        migrations: [],
+        lastBreak: null,
+        breakSeenAt: 0,
+        streakMilestones: [],
+        restIntro: 0
       }
     };
   }
@@ -279,6 +286,14 @@
     if (!base.meta.counters) base.meta.counters = { residues: 0, converted: 0, settledDays: 0, allClearDays: 0, tasks: 0, rejected: 0, approved: 0 };
     if (!Array.isArray(base.meta.recentFamilies)) base.meta.recentFamilies = [];
     if (!Array.isArray(base.meta.recentMicro)) base.meta.recentMicro = [];
+    if (!Array.isArray(base.meta.streakMilestones)) base.meta.streakMilestones = [];
+    if (!Array.isArray(base.settings.restDays)) base.settings.restDays = [0, 6];
+    if (!Array.isArray(base.settings.holidays)) base.settings.holidays = [];
+    if (!Array.isArray(base.settings.workdays)) base.settings.workdays = [];
+    base.settings.restDays = base.settings.restDays.map(Number).filter(function (n) { return n >= 0 && n <= 6; });
+    base.settings.holidays = base.settings.holidays.filter(function (h) {
+      return h && /^\d{4}-\d{2}-\d{2}$/.test(h.start) && /^\d{4}-\d{2}-\d{2}$/.test(h.end) && h.start <= h.end;
+    });
     if (!Array.isArray(base.loot.equipped)) base.loot.equipped = [];
     if (!base.loot.owned) base.loot.owned = {};
     return base;
@@ -358,13 +373,53 @@
     };
   };
 
-  CORE.generateDay = function (state, dayKey) {
+  CORE.generateDay = function (state, dayKey, opts) {
+    opts = opts || {};
+    var mode = opts.mode || null;
     var rng = mulberry32(hashStr(dayKey + '|' + state.character.codename + '|' + state.character.level + '|' + (state.inventory.reroll || 0)));
     var pool = CORE.relevantFamilies(state);
     var recent = state.meta.recentFamilies || [];
     var quests = [];
     var used = [];
     var usedDomains = [];
+
+    /* 休战日：不生成职业任务，只留 2 条轻维护 + 1 微训练 + 1 事件 */
+    if (CORE.isRestDay(state, dayKey, mode)) {
+      var lightPool = pool.filter(function (f) { return f.domain !== 'career' && (f.tier || 1) <= 2; });
+      if (lightPool.length < 2) lightPool = pool.filter(function (f) { return f.domain !== 'career'; });
+      for (var li = 0; li < 2 && lightPool.length; li++) {
+        var lc = lightPool.filter(function (f) { return used.indexOf(f.id) < 0; });
+        if (!lc.length) break;
+        var lf = weightedPick(lc, rng, recent);
+        used.push(lf.id);
+        quests.push(CORE.makeQuest(lf, 'daily', state));
+      }
+      var lm = (root.CONTENT && root.CONTENT.micro) || [];
+      if (lm.length) {
+        var lrm = state.meta.recentMicro || [];
+        var lmp = lm.filter(function (m) { return lrm.indexOf(m.id) < 0; });
+        if (!lmp.length) lmp = lm;
+        var lmic = pick(lmp, rng);
+        quests.push({ id: uid('m'), kind: 'micro', microId: lmic.id, done: false, ts: 0, minutes: lmic.minutes });
+      }
+      var lev = null;
+      var levs = (root.CONTENT && root.CONTENT.events) || [];
+      if (levs.length) {
+        lev = pick(levs, rng);
+        quests.push({ id: uid('e'), kind: 'event', eventId: lev.id, done: false, ts: 0, minutes: 5 });
+      }
+      return {
+        key: dayKey,
+        report: { sleep: 7, energy: 3, pain: 0, load: 3 },
+        quests: quests,
+        rerolls: 0,
+        settled: false,
+        allClear: false,
+        eventDone: false,
+        rest: true,
+        mode: mode
+      };
+    }
 
     /* 日常 3 条：尽量覆盖至少 2 个域 */
     var dailyPool = pool.filter(function (f) { return f.kind !== 'challenge'; });
@@ -427,12 +482,14 @@
       rerolls: 0,
       settled: false,
       allClear: false,
-      eventDone: false
+      eventDone: false,
+      rest: false,
+      mode: mode
     };
   };
 
-  CORE.regenerateDaily = function (state, dayKey) {
-    var day = CORE.generateDay(state, dayKey);
+  CORE.regenerateDaily = function (state, dayKey, mode) {
+    var day = CORE.generateDay(state, dayKey, { mode: mode });
     /* 保留已完成的条目 */
     var done = (state.day && state.day.quests || []).filter(function (q) { return q.done; });
     day.quests = done.concat(day.quests.filter(function (q) {
@@ -527,8 +584,8 @@
     m *= 1 + CORE.equipBonus(state);
     var rp = CORE.residuePenalty(state, now);
     m *= rp.mult;
-    var pen = state.meta.breakPenaltyUntil ? parseDayKey(state.meta.breakPenaltyUntil) : null;
-    if (pen && pen.getTime() >= parseDayKey(CORE.dayKeyOf(new Date(now), state.settings.resetHour)).getTime()) m *= d.breakPenalty;
+    var pen = CORE.penaltyInfo(state, now);
+    if (pen.active) m *= pen.mult;
     return { mult: m, residue: rp };
   };
 
@@ -585,8 +642,11 @@
     now = now || Date.now();
     var result = {
       xp: 0, deltas: {}, loot: null, levelUp: false, rankUp: false,
-      converted: 0, convBonus: 0, allClear: false, settled: false,
-      controlBefore: CORE.controlIndex(state), controlAfter: 0
+      converted: 0, convBonus: 0, allClear: false, allClearRest: false, settled: false,
+      controlBefore: CORE.controlIndex(state), controlAfter: 0,
+      streak: state.streak.current, streakMult: CORE.streakMult(state),
+      rest: !!(state.day && state.day.rest), penalty: null,
+      streakMilestone: 0, streakMilestones: []
     };
     if (quest.done) return result;
 
@@ -644,15 +704,29 @@
         state.streak.best = Math.max(state.streak.best, state.streak.current);
         state.meta.counters.settledDays++;
         result.settled = true;
+        /* 连击里程碑：跨过的档位一次性补发，只展示最高档 */
+        var gained = [];
+        CORE.STREAK_MILESTONES.forEach(function (n) {
+          if (state.streak.current >= n && state.meta.streakMilestones.indexOf(n) < 0) {
+            var pts = n >= 30 ? 3 : n >= 14 ? 2 : 1;
+            state.meta.streakMilestones.push(n);
+            state.inventory.points += pts;
+            gained.push({ n: n, points: pts });
+          }
+        });
+        result.streakMilestone = gained.length ? gained[gained.length - 1].n : 0;
+        result.streakMilestones = gained;
       }
       var real = state.day.quests.filter(function (q) { return q.kind !== 'event'; });
       var allClear = real.length > 0 && real.every(function (q) { return q.done; });
       if (allClear && !state.day.allClear) {
         state.day.allClear = true;
         state.meta.counters.allClearDays++;
-        state.inventory.points += 3;
-        state.entropy = clamp(state.entropy - 10, 0, 100);
+        var isRest = !!state.day.rest;
+        state.inventory.points += isRest ? 1 : 3;
+        state.entropy = clamp(state.entropy - (isRest ? 5 : 10), 0, 100);
         result.allClear = true;
+        result.allClearRest = isRest;
       }
     }
     result.xp = xp;
@@ -664,7 +738,7 @@
     var rng = mulberry32(hashStr(String(now) + '|' + state.loot.totalRolls));
     var chance = quest.kind === 'challenge' ? 0.55 : quest.kind === 'main' ? 0.45 : 0.3;
     if (quest.kind === 'micro') chance = 0.08;
-    if (rng() < chance || result.allClear) {
+    if (rng() < chance || (result.allClear && !result.allClearRest)) {
       result.loot = CORE.rollLoot(state, rng);
     }
     state.loot.totalRolls++;
@@ -702,6 +776,10 @@
 
     result.controlAfter = CORE.controlIndex(state);
     result.logId = log.id;
+    result.streak = state.streak.current;
+    result.streakMult = CORE.streakMult(state);
+    result.rest = !!(state.day && state.day.rest);
+    result.penalty = CORE.penaltyInfo(state, now);
     state.updatedAt = now;
     return result;
   };
@@ -801,19 +879,40 @@
       state.day = CORE.generateDay(state, today);
       state.meta.lastSeenDay = today;
     } else if (state.day.key !== today) {
-      var gap = Math.max(1, daysBetween(state.day.key, today));
-      if (!state.day.settled) {
-        var d = CORE.diff(state);
-        var lost = state.streak.current;
-        state.streak.current = 0;
-        state.entropy = clamp(state.entropy + d.idleEntropy * Math.min(gap, 7), 0, 100);
+      var d = CORE.diff(state);
+      var prev = state.day;
+      var missed = 0, restCount = 0;
+      var cursor = prev.key, first = true;
+      while (cursor < today) {
+        var rest = CORE.isRestDay(state, cursor, first ? prev.mode : null);
+        var settled = first ? !!prev.settled : false;
+        if (rest) restCount++;
+        else if (!settled) missed++;
+        cursor = CORE.shiftDay(cursor, 1);
+        first = false;
+      }
+      var lost = state.streak.current;
+      if (missed > 0) {
         if (lost > 0) {
-          state.meta.breakPenaltyUntil = CORE.shiftDay(today, d.breakPenaltyDays - 1);
-          events.push({ type: 'missed', text: '昨日未结算：连击清零（原 ' + lost + '），惰性 +' + d.idleEntropy });
+          state.streak.current = 0;
+          state.meta.breakPenaltyUntil = d.breakPenaltyDays > 0 ? CORE.shiftDay(today, d.breakPenaltyDays - 1) : '';
+          state.meta.lastBreak = {
+            at: now, lost: lost, missedDays: missed,
+            penaltyUntil: state.meta.breakPenaltyUntil,
+            penaltyDays: d.breakPenaltyDays, shielded: false
+          };
+          state.meta.breakSeenAt = 0;
+          events.push({
+            type: 'break',
+            text: '断链：连击清零（原 ' + lost + '），漏结算 ' + missed + ' 个工作日',
+            detail: state.meta.lastBreak
+          });
+        } else {
+          events.push({ type: 'missed', text: '漏结算 ' + missed + ' 个工作日：惰性 +' + (d.idleEntropy * Math.min(missed, 7)) });
         }
-      } else if (gap > 1) {
-        state.entropy = clamp(state.entropy + CORE.diff(state).idleEntropy * (gap - 1), 0, 100);
-        events.push({ type: 'idle', text: '已 ' + (gap - 1) + ' 天未记录，惰性上升' });
+        state.entropy = clamp(state.entropy + d.idleEntropy * Math.min(missed, 7), 0, 100);
+      } else if (restCount > 0) {
+        events.push({ type: 'restgap', text: '休息日已跳过，连击保留' });
       }
       state.day = CORE.generateDay(state, today);
       state.meta.lastSeenDay = today;
@@ -870,6 +969,78 @@
     var d = parseDayKey(dayKey);
     d.setDate(d.getDate() + delta);
     return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+  };
+
+  /* ---------------- 休战日 / 假期 ---------------- */
+
+  CORE.weekdayOf = function (dayKey) { return parseDayKey(dayKey).getDay(); };
+
+  CORE.isRestDay = function (state, dayKey, mode) {
+    if (mode === 'rest') return true;
+    if (mode === 'work') return false;
+    var st = (state && state.settings) || {};
+    if ((st.workdays || []).indexOf(dayKey) >= 0) return false;
+    var hs = st.holidays || [];
+    for (var i = 0; i < hs.length; i++) {
+      if (dayKey >= hs[i].start && dayKey <= hs[i].end) return true;
+    }
+    return (st.restDays || []).indexOf(CORE.weekdayOf(dayKey)) >= 0;
+  };
+
+  CORE.addHoliday = function (state, start, end, label) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end) || start > end) return null;
+    var h = { id: uid('h'), start: start, end: end, label: label || '' };
+    state.settings.holidays.push(h);
+    return h;
+  };
+
+  CORE.removeHoliday = function (state, id) {
+    state.settings.holidays = state.settings.holidays.filter(function (h) { return h.id !== id; });
+  };
+
+  CORE.penaltyInfo = function (state, now) {
+    var today = dayKeyOf(new Date(now || Date.now()), state.settings.resetHour);
+    var until = state.meta.breakPenaltyUntil;
+    var d = CORE.diff(state);
+    if (!until || until < today) return { active: false, daysLeft: 0, mult: 1, until: '' };
+    return { active: true, daysLeft: Math.max(0, daysBetween(today, until) + 1), mult: d.breakPenalty, until: until };
+  };
+
+  CORE.hoursToReset = function (state, now) {
+    var n = new Date(now || Date.now());
+    var next = new Date(n.getTime());
+    next.setHours(state.settings.resetHour, 0, 0, 0);
+    if (next.getTime() <= n.getTime()) next.setDate(next.getDate() + 1);
+    return Math.max(0, (next.getTime() - n.getTime()) / 3600000);
+  };
+
+  CORE.STREAK_MILESTONES = [3, 7, 14, 30, 60, 100];
+
+  CORE.streakMilestoneAt = function (n) {
+    return CORE.STREAK_MILESTONES.indexOf(n) >= 0 ? n : 0;
+  };
+
+  CORE.streakRisk = function (state, now) {
+    if (!state.day || state.day.settled || state.day.rest) return { risk: false, hours: 0 };
+    var h = CORE.hoursToReset(state, now);
+    return { risk: h <= 8, hours: h };
+  };
+
+  CORE.useShield = function (state, now) {
+    if (!state.meta.lastBreak || state.meta.lastBreak.shielded) return null;
+    if ((state.streak.shields || 0) <= 0) return null;
+    state.streak.shields--;
+    var lost = state.meta.lastBreak.lost || 0;
+    state.streak.current = lost;
+    state.streak.best = Math.max(state.streak.best || 0, lost);
+    state.meta.lastBreak.shielded = true;
+    state.meta.breakSeenAt = now || Date.now();
+    state.meta.breakPenaltyUntil = state.meta.lastBreak.penaltyUntil || '';
+    return { restored: lost };
+  };
+
+  CORE.ackBreak = function (state, now) {
+    if (state.meta.lastBreak) state.meta.breakSeenAt = now || Date.now();
   };
 
   /* ---------------- 仪式 / 经验 ---------------- */

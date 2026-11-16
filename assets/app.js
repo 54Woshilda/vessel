@@ -58,12 +58,62 @@
       var AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) return;
       UI.ac = UI.ac || new AC();
+      if (UI.ac.state === 'suspended') UI.ac.resume();
       var o = UI.ac.createOscillator(), g = UI.ac.createGain();
       o.type = 'sine'; o.frequency.value = freq || 660;
       g.gain.value = 0.05;
       o.connect(g); g.connect(UI.ac.destination);
       o.start(); o.stop(UI.ac.currentTime + (dur || 0.12));
     } catch (e) {}
+  }
+
+  /* ---------------- 全屏反馈 ---------------- */
+  function fxShow(html, cls, locked) {
+    var el = $('#fx');
+    if (!el) return null;
+    el.className = 'fx ' + (cls || '');
+    el.innerHTML = html;
+    el.classList.remove('is-hidden');
+    el.onclick = locked ? null : function (e) { if (e.target === el) fxHide(); };
+    return el;
+  }
+  function fxHide() {
+    var el = $('#fx');
+    if (!el) return;
+    el.classList.add('out');
+    setTimeout(function () {
+      el.classList.add('is-hidden');
+      el.className = 'fx is-hidden';
+      el.innerHTML = '';
+      el.onclick = null;
+    }, 320);
+  }
+  function countTo(el, to, dur) {
+    if (!el) return;
+    var t0 = performance.now();
+    function step(t) {
+      var p = Math.min(1, (t - t0) / (dur || 720));
+      var e = 1 - Math.pow(1 - p, 3);
+      el.textContent = String(Math.round(to * e));
+      if (p < 1) requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+  }
+  function sfx(kind, res) {
+    if (!S || S.settings.sound === false) return;
+    var seq;
+    if (kind === 'break') seq = [196, 0, 165, 0, 131];
+    else if (kind === 'level') seq = [523, 659, 784, 1046];
+    else if (kind === 'legend') seq = [523, 784, 1046, 1318];
+    else if (kind === 'milestone') seq = [659, 880, 1174];
+    else seq = [660, 880];
+    seq.forEach(function (f, i) {
+      if (!f) return;
+      setTimeout(function () { beep(f, kind === 'break' ? 0.22 : 0.11); }, i * 105);
+    });
+    if (kind === 'break') vibrate([40, 70, 40, 70, 90]);
+    else if (kind === 'level') vibrate([12, 40, 12, 40, 24, 40, 40]);
+    else vibrate(kind === 'milestone' ? [15, 35, 15, 35, 25] : [8, 30, 8]);
   }
 
   /* ---------------- 启动 ---------------- */
@@ -88,11 +138,61 @@
     save();
     render();
     bindGlobal();
-    events.forEach(function (e) { toast(e.text, e.type === 'missed' ? 'bad' : e.type === 'season' ? 'amber' : 'good'); });
-    if (changed && S.character.xp > 0 && S.meta.takeoverDay !== S.day.key) {
+    events.forEach(function (e) {
+      if (e.type === 'break') return;
+      toast(e.text, e.type === 'missed' ? 'bad' : e.type === 'season' || e.type === 'restgap' ? 'amber' : 'good');
+    });
+    if (S.meta.lastBreak && !S.meta.breakSeenAt) {
+      showBreakFX();
+    } else if (changed && S.character.xp > 0 && S.meta.takeoverDay !== S.day.key) {
       S.meta.takeoverDay = S.day.key; save(); showTakeover();
     }
+    if (S.day && S.day.rest && !S.meta.restIntro) {
+      S.meta.restIntro = 1; save();
+      setTimeout(function () { toast('今日休战：不生成职业任务，未完成也不算断链。', 'amber'); }, 900);
+    }
     if (S.day && S.day.overload) setTimeout(function () { toast('检测到过载：今日只保留 1 条任务即可。', 'amber'); }, 1200);
+  }
+
+  function showBreakFX() {
+    var b = S.meta.lastBreak;
+    if (!b) return;
+    var pen = CORE.penaltyInfo(S, Date.now());
+    var d = CORE.DIFFICULTY[S.settings.difficulty];
+    var shields = S.streak.shields || 0;
+    var html = '<div class="fx-inner">' +
+      '<div class="fx-kicker red">CONNECTION LOST</div>' +
+      '<div class="bk-title">链路中断</div>' +
+      '<div class="bk-loss">连击 <b>' + b.lost + '</b> 天归零</div>' +
+      '<div class="bk-rows">' +
+        '<div><span>漏结算工作日</span><b>' + b.missedDays + ' 天</b></div>' +
+        '<div><span>惰性上升</span><b>+' + Math.min(7, b.missedDays * d.idleEntropy) + '</b></div>' +
+        '<div><span>XP 惩罚</span><b>×' + pen.mult + ' · ' + pen.daysLeft + ' 天</b></div>' +
+        '<div><span>下次断链</span><b>' + d.breakPenaltyDays + ' 天起</b></div>' +
+      '</div>' +
+      '<div class="bk-quote">连击不是身份，是记录。记录断了，角色还在。</div>' +
+      (shields > 0 && !b.shielded ? '<button class="btn amber block" data-bk="shield">使用连击护盾 · 恢复 ' + b.lost + ' 天（剩 ' + shields + ' 张）</button>' : '') +
+      '<button class="btn primary block mt8" data-bk="accept">' + (b.shielded ? '进入今日' : '接受清算，重新开始') + '</button>' +
+      '</div>';
+    var el = fxShow(html, 'break', true);
+    if (!el) return;
+    sfx('break');
+    $$('[data-bk]', el).forEach(function (btn) {
+      btn.onclick = function () {
+        var act = btn.getAttribute('data-bk');
+        if (act === 'shield') {
+          var r = CORE.useShield(S, Date.now());
+          if (!r) { toast('护盾不足或已使用', 'bad'); return; }
+          save(); render(); fxHide();
+          toast('护盾已消耗 · 连击恢复 ' + r.restored + ' 天', 'good');
+          vibrate([12, 40, 12]);
+          return;
+        }
+        CORE.ackBreak(S, Date.now());
+        save(); render(); fxHide();
+        toast('清算完成。今天重新开始。', 'amber');
+      };
+    });
   }
 
   function showTakeover() {
@@ -147,6 +247,7 @@
     if (!S || !S.meta.onboarded) return;
     renderTopbar();
     renderTabbar();
+    bindActions($('#topbar'));
     var v = $('#view');
     if (UI.tab === 'panel') v.innerHTML = viewPanel();
     else if (UI.tab === 'tasks') v.innerHTML = viewTasks();
@@ -197,6 +298,12 @@
     var form = CORE.formCompletion(S);
     var stage = CORE.stageOf(form);
     var res = CORE.residueList(S);
+    var pen = CORE.penaltyInfo(S, Date.now());
+    var risk = CORE.streakRisk(S, Date.now());
+    var banners = '';
+    if (S.day.rest) banners += '<div class="banner rest"><b>休战日</b><span>今天不生成职业任务；没做完也不会断连击。</span></div>';
+    if (pen.active) banners += '<div class="banner danger"><b>断链惩罚</b><span>XP ×' + pen.mult + ' · 剩余 ' + pen.daysLeft + ' 天</span></div>';
+    if (risk.risk) banners += '<div class="banner warn"><b>连击将断</b><span>距重置 ' + risk.hours.toFixed(1) + ' 小时，今天还没有结算。</span></div>';
     var creed = CONTENT.creeds[(S.streak.current + new Date().getDate()) % CONTENT.creeds.length];
     var done = S.day.quests.filter(function (q) { return q.done; }).length;
     var total = S.day.quests.filter(function (q) { return q.kind !== 'event'; }).length;
@@ -227,7 +334,7 @@
 
     return '<div class="card hero glow">' +
       '<div class="hero-top"><div><div class="hero-name">' + esc(c.codename) + '</div>' +
-      '<div class="hero-rank">' + esc(CORE.rankOf(c.level).name) + ' · ' + esc(stage.name) + '</div></div>' +
+      '<div class="hero-rank">' + esc(CORE.rankOf(c.level).name) + ' · ' + esc(stage.name) + (S.day.rest ? ' · <span style="color:var(--amber)">休战</span>' : '') + '</div></div>' +
       '<div class="hero-lv"><b>' + c.level + '</b><span>LEVEL</span></div></div>' +
       '<div class="xpbar"><i style="width:' + pct + '%"></i></div>' +
       '<div class="xpmeta"><span>XP ' + c.xp + '</span><span>' + into + ' / ' + need + '</span></div>' +
@@ -238,7 +345,7 @@
       '<div class="hstat"><b style="color:' + (res.length ? 'var(--red)' : 'var(--green)') + '">' + res.length + '</b><span>残渣</span></div>' +
       '</div>' +
       '<div class="hero-quote"><i>◈</i><div>' + esc(creed.text) + '</div></div>' +
-      '</div>' +
+      '</div>' + banners +
 
       '<div class="card"><div class="card-h"><div class="card-t">载体控制</div><span class="card-link" data-act="tab" data-id="shape">形态 ›</span></div>' +
       '<div class="formbars"><div class="fbar"><span>控制指数</span><div class="track"><i style="width:' + ctrl + '%;background:linear-gradient(90deg,#1aa8d6,#4fd7ff)"></i></div><b>' + ctrl + '</b></div>' +
@@ -268,11 +375,23 @@
     var eventQ = qs.filter(function (q) { return q.kind === 'event'; })[0];
     var ev = eventQ ? CORE.eventById(eventQ.eventId) : null;
 
-    var html = '<div class="card"><div class="card-h"><div class="card-t strong">今日协议</div><span class="card-link" data-act="reroll">换牌 ⟳</span></div>' +
+    var pen = CORE.penaltyInfo(S, Date.now());
+    var risk = CORE.streakRisk(S, Date.now());
+    var top = '';
+    if (S.day.rest) top += '<div class="banner rest"><b>休战日</b><span>不生成职业任务；没做完也不会断连击。想练可以切成「今日开工」。</span></div>';
+    if (pen.active) top += '<div class="banner danger"><b>断链惩罚</b><span>XP ×' + pen.mult + ' · 剩余 ' + pen.daysLeft + ' 天</span></div>';
+    if (risk.risk) top += '<div class="banner warn"><b>连击将断</b><span>距重置 ' + risk.hours.toFixed(1) + ' 小时，今天还没有结算。</span></div>';
+
+    var html = top + '<div class="card"><div class="card-h"><div class="card-t strong">今日协议</div>' +
+      '<div style="display:flex;gap:10px;align-items:center">' +
+      '<button class="btn sm ghost" data-act="restday">' + (S.day.rest ? '今日开工' : '今日休战') + '</button>' +
+      '<span class="card-link" data-act="reroll">换牌 ⟳</span></div></div>' +
       '<div style="display:flex;align-items:baseline;gap:8px"><div style="font-size:30px;font-weight:800;color:var(--cyan)">' + done + '</div>' +
       '<div style="color:var(--dim);font-size:11px">/ ' + real.length + ' 条非事件任务 · XP 倍率 ×' + round1(CORE.xpMultiplier(S, Date.now()).mult * 10) / 10 + '</div></div>' +
       '<div class="xpbar mt8"><i style="width:' + (real.length ? done / real.length * 100 : 0) + '%"></i></div>' +
-      (S.day.settled ? '<div class="small mt8" style="color:var(--green)">今日已结算 · 连击 ' + S.streak.current + ' 天</div>' : '<div class="small mt8" style="color:var(--amber)">完成任意一条任务即视为今日结算，可保住连击。</div>') +
+      (S.day.settled ? '<div class="small mt8" style="color:var(--green)">今日已结算 · 连击 ' + S.streak.current + ' 天</div>' :
+        S.day.rest ? '<div class="small mt8" style="color:var(--amber)">休战日：不结算也不会断连击。想做就做一条轻任务。</div>' :
+          '<div class="small mt8" style="color:var(--amber)">完成任意一条任务即视为今日结算，可保住连击。</div>') +
       '</div>' +
 
       '<div class="card"><div class="card-h"><div class="card-t">载体状态报告</div><span class="badge">影响 XP 判定</span></div>' +
@@ -502,9 +621,10 @@
       '<div class="btn-row"><button class="btn" data-act="export">导出存档</button><button class="btn" data-act="import">导入存档</button></div>' +
       '<div class="small mt8">数据只保存在这台设备的浏览器里。换机或清理浏览器前务必导出。</div></div>' +
 
-      '<div class="card"><div class="card-h"><div class="card-t">关于</div><span class="badge">v1.0</span></div>' +
+      '<div class="card"><div class="card-h"><div class="card-t">关于</div><span class="badge">v1.1</span></div>' +
       '<div class="prose"><p>载体协议是一个纯本地、零网络的自我训练工具。它不评判你，只记录证据。</p>' +
       '<p>规则：情绪是数据；肉身是载体；行动先于感受。</p>' +
+      '<p class="small">v1.1：休息日/假期不生成职业任务，断链清算与结算反馈改为全屏。设置里可改每周休息日、加假期区间与补班日。</p>' +
       '<p class="small">本工具不提供医疗、法律或投资建议；涉及药物与客户信息时，遵守公司合规与医院规定。</p></div></div>';
   }
 
@@ -536,6 +656,7 @@
     if (act === 'boss') { openBoss(); return; }
     if (act === 'reroll') { reroll(); return; }
     if (act === 'report-save') { saveReport(); return; }
+    if (act === 'restday') { toggleTodayRest(); return; }
     if (act === 'target') { openTarget(); return; }
     if (act === 'metrics-save') { saveMetrics(); return; }
     if (act === 'milestone') { toggleMilestone(id); return; }
@@ -799,29 +920,55 @@
   }
 
   function showResult(res, report) {
-    var body = '<div class="result"><div class="xp">+' + res.xp + ' <small>XP</small></div>' +
-      (res.levelUp ? '<div class="small mt8" style="color:var(--amber)">LEVEL UP · LV ' + S.character.level + ' · ' + esc(CORE.rankOf(S.character.level).name) + '</div>' : '') +
-      (res.rankUp ? '<div class="small mt8" style="color:var(--violet)">称号晋升：' + esc(CORE.rankOf(S.character.level).name) + '</div>' : '') +
-      (res.allClear ? '<div class="small mt8" style="color:var(--green)">全清 · +3 点 · 惰性 -10</div>' : '') +
-      '</div><div class="deltas">' + Object.keys(res.deltas || {}).filter(function (k) { return res.deltas[k]; }).map(function (k) {
-        return '<span class="delta">' + attrName(k) + ' ' + (res.deltas[k] > 0 ? '+' : '') + res.deltas[k] + '</span>';
-      }).join('') + (res.converted ? '<span class="delta" style="border-color:rgba(74,222,128,.3);color:#baf7d0">残渣转化 ×' + res.converted + ' +' + res.convBonus + ' XP</span>' : '') + '</div>';
-
-    if (res.loot) {
-      var it = res.loot.item, rar = CORE.LOOT_RARITY[it.rarity];
-      body += '<div class="loot-card ' + it.rarity + '"><div class="loot-r">' + rar.name + ' · 掉落</div>' +
-        '<div class="loot-n" style="color:' + rar.color + '">' + esc(it.name) + '</div>' +
-        '<div class="loot-t">' + esc(it.text) + '</div>' +
-        (res.loot.dup ? '<div class="small mt8">重复 → 碎片 +' + res.loot.shards + '</div>' : '<div class="small mt8">已收录。可在档案中装备（最多 3 件）。</div>') + '</div>';
-    } else {
-      body += '<div class="small center mt12" style="color:var(--dim)">本次没有掉落。概率不是奖励，是节奏。</div>';
+    var loot = res.loot && res.loot.item;
+    var rar = loot ? CORE.LOOT_RARITY[loot.rarity] : null;
+    var tone = res.levelUp ? 'level' : loot && loot.rarity === 'legendary' ? 'legend' : res.allClear || res.streakMilestone ? 'milestone' : 'normal';
+    var tags = [];
+    if (res.levelUp) tags.push('<span class="fx-tag amber">LEVEL UP · LV ' + S.character.level + ' · ' + esc(CORE.rankOf(S.character.level).name) + '</span>');
+    if (res.rankUp) tags.push('<span class="fx-tag violet">称号晋升 · ' + esc(CORE.rankOf(S.character.level).name) + '</span>');
+    if (res.streakMilestone) {
+      var ms = res.streakMilestones || [];
+      var mpts = ms.reduce(function (a, m) { return a + (m.points || 0); }, 0);
+      tags.push('<span class="fx-tag amber">连击 ' + res.streak + ' 天 · 里程碑 ' + ms.map(function (m) { return m.n; }).join('/') + ' · +' + mpts + ' 点</span>');
     }
-    body += '<div class="card mt12" style="background:rgba(8,13,20,.5)"><div class="small" style="color:var(--dim)">战报</div><div class="prose mt8"><p>' + esc(report) + '</p></div></div>';
-    body += '<button class="btn primary block mt12" data-x="1">继续</button>';
-    var sh = openSheet('结算完成', body);
-    $$('[data-x]', sh.sheet).forEach(function (b) { b.onclick = function () { sh.close(); }; });
-    vibrate([8, 40, 12]); beep(760, 0.09);
-    setTimeout(function () { beep(1040, 0.12); }, 110);
+    if (res.allClear) tags.push('<span class="fx-tag green">全清 · +' + (res.allClearRest ? 1 : 3) + ' 点 · 惰性 -' + (res.allClearRest ? 5 : 10) + '</span>');
+    if (res.converted) tags.push('<span class="fx-tag green">残渣转化 ×' + res.converted + ' · +' + res.convBonus + ' XP</span>');
+    if (res.rest) tags.push('<span class="fx-tag dim">休战日结算</span>');
+    if (res.penalty && res.penalty.active) tags.push('<span class="fx-tag red">断链惩罚 ×' + res.penalty.mult + ' · 剩余 ' + res.penalty.daysLeft + ' 天</span>');
+
+    var deltas = Object.keys(res.deltas || {}).filter(function (k) { return res.deltas[k]; }).map(function (k, i) {
+      return '<span class="fx-delta" style="animation-delay:' + (i * 90 + 260) + 'ms">' + attrName(k) + ' ' +
+        (res.deltas[k] > 0 ? '+' : '') + res.deltas[k] + '</span>';
+    }).join('');
+
+    var html = '<div class="fx-inner">' +
+      '<div class="fx-kicker">SETTLEMENT · 结算完成</div>' +
+      '<div class="fx-code">' + esc(S.character.codename) + '</div>' +
+      '<div class="fx-xp"><b id="fx_xp">0</b><span>+XP</span></div>' +
+      '<div class="fx-streak">连击 <b>' + (res.streak != null ? res.streak : S.streak.current) + '</b> 天' +
+        (res.streakMult ? '<i>×' + round1(res.streakMult) + '</i>' : '') + '</div>' +
+      (tags.length ? '<div class="fx-tags">' + tags.join('') + '</div>' : '') +
+      (deltas ? '<div class="fx-deltas">' + deltas + '</div>' : '');
+
+    if (loot) {
+      html += '<div class="fx-loot ' + loot.rarity + '">' +
+        '<div class="fx-loot-r">' + esc(rar.name) + ' · 掉落</div>' +
+        '<div class="fx-loot-n" style="color:' + rar.color + '">' + esc(loot.name) + '</div>' +
+        '<div class="fx-loot-t">' + esc(loot.text) + '</div>' +
+        (res.loot.dup ? '<div class="fx-loot-x">重复 → 碎片 +' + res.loot.shards + '</div>' : '<div class="fx-loot-x">已收录 · 档案中可装备</div>') +
+        '</div>';
+    }
+
+    html += '<div class="fx-report"><span>战报</span><p>' + esc(report) + '</p></div>' +
+      '<button class="btn primary block" data-fx="close">收下战报</button></div>';
+
+    var el = fxShow(html, 'celebrate tone-' + tone, true);
+    if (!el) return;
+    countTo($('#fx_xp', el), res.xp, 760);
+    var close = $('[data-fx=close]', el);
+    if (close) close.onclick = function () { fxHide(); render(); };
+    sfx(tone === 'level' ? 'level' : tone === 'legend' ? 'legend' : res.streakMilestone ? 'milestone' : 'result', res);
+    if (res.allClear) setTimeout(function () { beep(1180, 0.16); vibrate([10, 30, 10, 30, 30]); }, 520);
   }
 
   /* ---------------- 微训练 ---------------- */
@@ -969,9 +1116,19 @@
     if (S.character.xp === 0) { toast('先完成一条任务再换牌', 'bad'); return; }
     if (S.day.rerolls >= 1) { toast('今日已换过一次牌', 'bad'); return; }
     S.day.rerolls = (S.day.rerolls || 0) + 1;
-    CORE.regenerateDaily(S, todayKey());
+    CORE.regenerateDaily(S, todayKey(), S.day.mode);
     save(); render();
     toast('今日协议已重抽（已完成任务保留）', 'good');
+    vibrate(14);
+  }
+
+  function toggleTodayRest() {
+    var mode = S.day.rest ? 'work' : 'rest';
+    var msg = mode === 'rest' ? '今天切为休战日？职业任务会移除，连击受保护。' : '切回工作日？会重新生成职业任务。';
+    if (!confirm(msg)) return;
+    CORE.regenerateDaily(S, todayKey(), mode);
+    save(); render();
+    toast(mode === 'rest' ? '今日休战：只保留轻任务。' : '今日开工：职业任务已装载。', mode === 'rest' ? 'amber' : 'good');
     vibrate(14);
   }
 
@@ -1118,6 +1275,24 @@
       '<div class="sec"><h2>节奏</h2></div>' +
       '<div class="field"><label>每日重置时间</label><div class="chips" id="st_reset">' +
       [0, 2, 3, 4, 5, 6].map(function (h) { return '<button class="chip sm ' + (S.settings.resetHour === h ? 'on' : '') + '" data-reset="' + h + '">' + h + ':00</button>'; }).join('') + '</div></div>' +
+      '<div class="sec"><h2>休息日</h2><span>默认周六日</span></div>' +
+      '<div class="chips" id="st_rest">' +
+      ['日', '一', '二', '三', '四', '五', '六'].map(function (n, i) {
+        return '<button class="chip sm ' + ((S.settings.restDays || []).indexOf(i) >= 0 ? 'on' : '') + '" data-rest-day="' + i + '">周' + n + '</button>';
+      }).join('') + '</div>' +
+      '<div class="small mt8">休息日不生成职业任务，没做完也不算断链。今天想练，可在任务页点「今日开工」。</div>' +
+      '<div class="sec"><h2>假期与补班</h2></div>' +
+      '<div class="field"><label>假期区间</label><div class="btn-row"><input class="input" type="date" id="st_hs"><input class="input" type="date" id="st_he"></div>' +
+      '<input class="input mt8" id="st_hl" maxlength="12" placeholder="名称，例：春节（可选）">' +
+      '<button class="btn sm block mt8" data-h-add="1">添加假期</button></div>' +
+      ((S.settings.holidays || []).length ? '<div class="chips mt8">' + S.settings.holidays.map(function (h) {
+        return '<span class="chip sm on" style="cursor:default">' + esc(h.label || '假期') + ' ' + esc(h.start) + '→' + esc(h.end) +
+          ' <b data-h-del="' + h.id + '" style="color:var(--red);cursor:pointer;margin-left:4px">✕</b></span>';
+      }).join('') + '</div>' : '') +
+      '<div class="field mt12"><label>补班日（单日）</label><div class="btn-row"><input class="input" type="date" id="st_wd"><button class="btn sm" data-w-add="1" style="flex:0 0 auto;white-space:nowrap">添加</button></div></div>' +
+      ((S.settings.workdays || []).length ? '<div class="chips mt8">' + S.settings.workdays.map(function (d) {
+        return '<span class="chip sm on" style="cursor:default">' + esc(d) + ' <b data-w-del="' + esc(d) + '" style="color:var(--red);cursor:pointer;margin-left:4px">✕</b></span>';
+      }).join('') + '</div>' : '') +
       '<div class="sw"><div class="sw-l"><div>震动反馈</div></div><div class="switch ' + (S.settings.haptics ? 'on' : '') + '" data-tgl="haptics"></div></div>' +
       '<div class="sw"><div class="sw-l"><div>音效</div></div><div class="switch ' + (S.settings.sound ? 'on' : '') + '" data-tgl="sound"></div></div>' +
       '<div class="sec"><h2>安装</h2></div>' +
@@ -1133,6 +1308,55 @@
     });
     $$('[data-reset]', sh.sheet).forEach(function (b) {
       b.onclick = function () { S.settings.resetHour = Number(b.getAttribute('data-reset')); save(); sh.close(); render(); toast('重置时间已更新', 'good'); };
+    });
+    $$('[data-rest-day]', sh.sheet).forEach(function (b) {
+      b.onclick = function () {
+        var d = Number(b.getAttribute('data-rest-day'));
+        var arr = S.settings.restDays;
+        var i = arr.indexOf(d);
+        if (i >= 0) arr.splice(i, 1); else arr.push(d);
+        arr.sort(function (x, y) { return x - y; });
+        b.classList.toggle('on');
+        if (S.day && S.day.key === todayKey()) CORE.regenerateDaily(S, todayKey(), S.day.mode);
+        save(); render();
+      };
+    });
+    var addH = $('[data-h-add]', sh.sheet);
+    if (addH) addH.onclick = function () {
+      var a = $('#st_hs', sh.sheet).value, b = $('#st_he', sh.sheet).value;
+      if (!a || !b) { toast('请选择起始和结束日期', 'bad'); return; }
+      var h = CORE.addHoliday(S, a, b, ($('#st_hl', sh.sheet).value || '').trim());
+      if (!h) { toast('日期不合法：结束不能早于开始', 'bad'); return; }
+      if (S.day && S.day.key === todayKey()) CORE.regenerateDaily(S, todayKey(), S.day.mode);
+      save(); sh.close(); render(); openSettings();
+      toast('假期已添加', 'good');
+    };
+    $$('[data-h-del]', sh.sheet).forEach(function (b) {
+      b.onclick = function () {
+        CORE.removeHoliday(S, b.getAttribute('data-h-del'));
+        if (S.day && S.day.key === todayKey()) CORE.regenerateDaily(S, todayKey(), S.day.mode);
+        save(); sh.close(); render(); openSettings();
+        toast('假期已移除', 'amber');
+      };
+    });
+    var addW = $('[data-w-add]', sh.sheet);
+    if (addW) addW.onclick = function () {
+      var d = $('#st_wd', sh.sheet).value;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) { toast('请选择补班日期', 'bad'); return; }
+      if (S.settings.workdays.indexOf(d) < 0) S.settings.workdays.push(d);
+      S.settings.workdays.sort();
+      if (S.day && S.day.key === todayKey()) CORE.regenerateDaily(S, todayKey(), S.day.mode);
+      save(); sh.close(); render(); openSettings();
+      toast('补班日已添加', 'good');
+    };
+    $$('[data-w-del]', sh.sheet).forEach(function (b) {
+      b.onclick = function () {
+        var d = b.getAttribute('data-w-del');
+        S.settings.workdays = S.settings.workdays.filter(function (x) { return x !== d; });
+        if (S.day && S.day.key === todayKey()) CORE.regenerateDaily(S, todayKey(), S.day.mode);
+        save(); sh.close(); render(); openSettings();
+        toast('补班日已移除', 'amber');
+      };
     });
     $$('[data-tgl]', sh.sheet).forEach(function (b) {
       b.onclick = function () {
@@ -1428,11 +1652,14 @@
     });
     $('#fab').addEventListener('click', openQuick);
     document.addEventListener('visibilitychange', function () {
-      if (!document.hidden && S && S.meta.onboarded) {
-        var evs = CORE.reconcile(S, Date.now());
-        save(); render();
-        evs.forEach(function (x) { toast(x.text, x.type === 'missed' ? 'bad' : 'good'); });
-      }
+      if (document.hidden || !S || !S.meta.onboarded) return;
+      var evs = CORE.reconcile(S, Date.now());
+      save(); render();
+      evs.forEach(function (x) {
+        if (x.type === 'break') return;
+        toast(x.text, x.type === 'missed' ? 'bad' : x.type === 'season' ? 'amber' : 'good');
+      });
+      if (S.meta.lastBreak && !S.meta.breakSeenAt) showBreakFX();
     });
   }
 

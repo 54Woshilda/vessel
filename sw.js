@@ -1,6 +1,6 @@
 /* 载体协议 VESSEL — Service Worker：离线优先 */
 'use strict';
-var CACHE = 'vessel-v1.0.0';
+var CACHE = 'vessel-v1.1.0';
 var ASSETS = [
   './',
   './index.html',
